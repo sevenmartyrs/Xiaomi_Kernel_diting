@@ -98,10 +98,9 @@ jobs:
           cp ./susfs4ksu/kernel_patches/include/linux/* ./include/linux/
           patch -p1 < 50_add_susfs_in_gki-android12-5.10.patch || true
 
-      - name: 集成KPM
+      - name: 启用KPM
         run: |
           cd $GITHUB_WORKSPACE
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-KernelPatchModule/main/kernel/setup.sh" | bash
           echo "CONFIG_KPM=y" >> ./arch/arm64/configs/vendor/diting_GKI.config
 
       - name: 开启BBG基带守护
