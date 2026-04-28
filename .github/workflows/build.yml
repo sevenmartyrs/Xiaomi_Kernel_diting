@@ -62,6 +62,7 @@ jobs:
           tar -xvaf LLVM-20.1.0-Linux-X64.tar.xz
           mv LLVM-20.1.0-Linux-X64 aosp-clang
           rm LLVM-20.1.0-Linux-X64.tar.xz
+          sudo apt install -y lld
           echo "AOSP_CLANG_PATH=$(pwd)/aosp-clang" >> $GITHUB_ENV
           echo "PATH=$(pwd)/aosp-clang/bin:$PATH" >> $GITHUB_ENV
 
