@@ -1,0 +1,220 @@
+name: Build Kernel
+env:
+  TZ: Asia/Shanghai
+  ANDROID_VERSION: 'android12'
+  KERNEL_VERSION: '5.10'
+  KERNEL_NAME: 'diting-optimized'
+on:
+  workflow_dispatch:
+    inputs:
+      enable_bbg:
+        description: "开启BBG基带守护"
+        required: false
+        default: true
+        type: boolean
+      kernel_suffix:
+        description: '内核后缀(留空默认,开头别加连字符)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 最大化构建空间
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          swap-size-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: 安装依赖
+        run: |
+          sudo apt update -y
+          sudo apt install -y \
+            build-essential \
+            flex bison \
+            dwarves \
+            libssl-dev \
+            libelf-dev \
+            bc \
+            python3 \
+            python-is-python3 \
+            make \
+            cmake \
+            zip \
+            curl \
+            wget \
+            gnupg \
+            gawk \
+            gcc-multilib \
+            g++-multilib \
+            ccache \
+            rsync \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabihf
+
+          wget -O LLVM-20.1.0-Linux-X64.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.0/LLVM-20.1.0-Linux-X64.tar.xz
+          tar -xvaf LLVM-20.1.0-Linux-X64.tar.xz
+          mv LLVM-20.1.0-Linux-X64 aosp-clang
+          rm LLVM-20.1.0-Linux-X64.tar.xz
+          echo "AOSP_CLANG_PATH=$(pwd)/aosp-clang" >> $GITHUB_ENV
+          echo "PATH=$(pwd)/aosp-clang/bin:$PATH" >> $GITHUB_ENV
+
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 准备源码
+        run: |
+          cd $GITHUB_WORKSPACE
+          echo "去除 ABI 保护 & 去除 dirty 后缀..."
+          sudo sed -i 's/check_defconfig//' ./build.config.gki
+          rm -f android/abi_gki_protected_exports_*
+          for f in scripts/setlocalversion; do
+            sed -i 's/ -dirty//g' "$f"
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
+          done
+
+      - name: 集成SukiSU
+        run: |
+          cd $GITHUB_WORKSPACE
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/setup.sh" | bash -s builtin
+          cat >> ./arch/arm64/configs/vendor/diting_GKI.config <<EOF
+          CONFIG_KSU=y
+          CONFIG_KSU_MULTI_MANAGER_SUPPORT=y
+          CONFIG_KSU_FULL_NAME_FORMAT="SukiSU"
+          EOF
+
+      - name: 集成SUSFS
+        run: |
+          cd $GITHUB_WORKSPACE
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu susfs4ksu -b gki-android12-5.10
+          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch ./
+          cp ./susfs4ksu/kernel_patches/fs/* ./fs/
+          cp ./susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+          patch -p1 < 50_add_susfs_in_gki-android12-5.10.patch || true
+
+      - name: 集成KPM
+        run: |
+          cd $GITHUB_WORKSPACE
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-KernelPatchModule/main/kernel/setup.sh" | bash
+          echo "CONFIG_KPM=y" >> ./arch/arm64/configs/vendor/diting_GKI.config
+
+      - name: 开启BBG基带守护
+        if: ${{ github.event.inputs.enable_bbg == 'true' }}
+        run: |
+          cd $GITHUB_WORKSPACE
+          curl -LSs https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh | bash
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+          echo "CONFIG_BBG=y" >> ./arch/arm64/configs/vendor/diting_GKI.config
+
+      - name: 启用SUSFS配置
+        run: |
+          cd $GITHUB_WORKSPACE
+          cat >> ./arch/arm64/configs/vendor/diting_GKI.config <<EOF
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          CONFIG_TMPFS=y
+          EOF
+
+      - name: 设置内核后缀
+        if: ${{ github.event.inputs.kernel_suffix != '' }}
+        run: |
+          cd $GITHUB_WORKSPACE
+          sed -i "s/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"-${{ github.event.inputs.kernel_suffix }}\"/" ./arch/arm64/configs/vendor/diting_GKI.config
+
+      - name: 构建内核
+        run: |
+          cd $GITHUB_WORKSPACE
+          export ARCH=arm64
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH=$AOSP_CLANG_PATH/bin:$PATH
+          export LLVM=1
+          export LLVM_IAS=0
+          export KCFLAGS="-Wno-error -Wno-deprecated-declarations"
+          export KBUILD_BUILD_VERSION="0"
+          export SOURCE_DATE_EPOCH=$(date +%s)
+          make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC="clang" BUILD_CONFIG=build.config.gki.aarch64 O=out DEPMOD=depmod gki_defconfig
+          scripts/config --file out/.config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO
+          make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1
+
+      - name: 打包AnyKernel3
+        run: |
+          cd $GITHUB_WORKSPACE
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1
+          rm -rf ./AnyKernel3/.git
+          cp ./out/arch/arm64/boot/Image ./AnyKernel3/
+          cd AnyKernel3
+          zip -r ../diting_optimized_kernel.zip ./*
+
+      - name: 上传ZIP工件
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel_ZIP_Artifacts
+          path: ${{ github.workspace }}/diting_optimized_kernel.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+
+    steps:
+      - name: 下载ZIP工件
+        uses: actions/download-artifact@v4
+        with:
+          name: Kernel_ZIP_Artifacts
+          path: ./release_zips
+
+      - name: 创建发布
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "Kernel-build-${{ env.TIME }}"
+          name: "diting-optimized-5.10.81"
+          body: |
+            ## 小米 diting (Redmi K50 Ultra) 优化内核
+
+            基于 Xiaomi_Kernel_OpenSource (5.10.81) + WALT 调度优化
+
+            ### 内核优化
+            - WALT 调频器优化 (hispeed_load/target_loads/rtg_boost)
+            - WALT 调度优化 (upmigrate/downmigrate/input_boost)
+            - ZRAM 内存压缩 + F2FS 文件压缩
+            - 网络调度优化 (fq_codel + ECN)
+            - SLUB 稳定性修复
+
+            ### 集成模块
+            - SukiSU (Root方案)
+            - SUSFS 2.0 (隐藏Root)
+            - KPM (内核补丁模块)
+            - BBG (基带守护, 可选)
+
+          draft: false
+          prerelease: false
+          files: |
+            release_zips/*.zip
+        env:
+          TIME: "$(TZ='Asia/Shanghai' date +'%y%m%d%H%M%S')"
