@@ -79,8 +79,9 @@ jobs:
             sed -i 's/ -dirty//g' "$f"
             sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
           done
-          echo "移除缺失的 hwid Kconfig 引用..."
+          echo "移除缺失的小米专有驱动 Kconfig 引用..."
           sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig
+          sed -i '/source "drivers\/misc\/plaid\/Kconfig"/d' drivers/misc/Kconfig
 
       - name: 集成SukiSU
         run: |
